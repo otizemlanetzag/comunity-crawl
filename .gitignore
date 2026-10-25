@@ -1,0 +1,8 @@
+# Local credentials — never commit these
+ github_token.txt
+config.ini
+
+# Local crawl data
+ data/
+__pycache__/
+*.py[cod]
