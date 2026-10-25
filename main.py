@@ -18,6 +18,7 @@ from bs4 import BeautifulSoup
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_DIR, "data")
+TOKEN_FILE = os.path.join(APP_DIR, "github_token.txt")
 PAGES_FILE = os.path.join(DATA_DIR, "CRAWLED.CSV")
 QUEUE_FILE = os.path.join(DATA_DIR, "CRAWL_QUEUE.CSV")
 PAGE_FIELDS = ["site_name", "site_url", "crawled_at", "title", "text", "links", "status"]
@@ -381,6 +382,9 @@ class CrawlerApp:
 
 if __name__ == "__main__":
     os.makedirs(DATA_DIR, exist_ok=True)
+    if not os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "w", encoding="utf-8") as token_file:
+            token_file.write("# Paste your GitHub access token on the next line. Keep this file private.\\n")
     read_rows(PAGES_FILE, PAGE_FIELDS)
     read_rows(QUEUE_FILE, QUEUE_FIELDS)
     root = tk.Tk()
