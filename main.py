@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import ipaddress
+import json
 import os
 import queue
 import urllib.robotparser
@@ -24,6 +25,7 @@ PAGES_FILE = os.path.join(DATA_DIR, "CRAWLED.CSV")
 QUEUE_FILE = os.path.join(DATA_DIR, "CRAWL_QUEUE.CSV")
 PAGE_FIELDS = ["site_name", "site_url", "crawled_at", "title", "text", "links", "status"]
 QUEUE_FIELDS = ["site_name", "site_url", "status", "added_at", "error"]
+WORDS_FILE = os.path.join(APP_DIR, "WORDS.JSON")
 USER_AGENT = "CommunityCrawlDesktop/1.0 (+local desktop crawler)"
 ROBOTS_CACHE = {}
 ROBOTS_LOCK = threading.Lock()
@@ -105,6 +107,38 @@ def robots_allowed(url):
     return parser.can_fetch(USER_AGENT, url)
 
 
+def load_bot_restriction_terms():
+    """Load editable words and phrases from WORDS.JSON."""
+    try:
+        with open(WORDS_FILE, "r", encoding="utf-8-sig") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return [], []
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Could not read WORDS.JSON: {exc}") from exc
+
+    phrases = data.get("phrases", [])
+    words = data.get("words", [])
+    if not isinstance(phrases, list) or not isinstance(words, list):
+        raise RuntimeError('WORDS.JSON must contain "phrases" and "words" arrays.')
+    phrases = [str(item).strip() for item in phrases if str(item).strip()]
+    words = [str(item).strip() for item in words if str(item).strip()]
+    return phrases, words
+
+
+def find_bot_restriction(text, phrases, words):
+    """Return the exact matching term found in page text, or an empty string."""
+    folded = " ".join(text.casefold().split())
+    for phrase in phrases:
+        if " ".join(phrase.casefold().split()) in folded:
+            return phrase
+    for word in words:
+        needle = word.casefold().strip()
+        if needle and needle in folded:
+            return word
+    return ""
+
+
 def read_rows(path, fields):
     os.makedirs(DATA_DIR, exist_ok=True)
     if not os.path.exists(path):
@@ -140,6 +174,8 @@ class CrawlerApp:
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.running = False
+        self.bot_decision_event = threading.Event()
+        self.bot_decision_value = False
         self.pages = read_rows(PAGES_FILE, PAGE_FIELDS)
         self.queue_rows = read_rows(QUEUE_FILE, QUEUE_FIELDS)
         self._build_ui()
@@ -195,7 +231,7 @@ class CrawlerApp:
         self.log.configure(yscrollcommand=scrollbar.set)
         self.log.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        ttk.Label(outer, text="Saved files: data/CRAWLED.CSV and data/CRAWL_QUEUE.CSV", foreground="#596579").pack(anchor="w", pady=(10, 0))
+        ttk.Label(outer, text="Saved files: data/CRAWLED.CSV and data/CRAWL_QUEUE.CSV  |  Restriction phrases: WORDS.JSON", foreground="#596579").pack(anchor="w", pady=(10, 0))
 
     def log_message(self, message):
         self.log.configure(state="normal")
@@ -263,6 +299,11 @@ class CrawlerApp:
         session.headers.update({"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"})
         processed = 0
         try:
+            try:
+                restriction_phrases, restriction_words = load_bot_restriction_terms()
+            except RuntimeError as exc:
+                self.events.put(("log", str(exc)))
+                restriction_phrases, restriction_words = [], []
             while todo and processed < limit and not self.stop_event.is_set():
                 self.pause_event.wait()
                 if self.stop_event.is_set():
@@ -318,6 +359,18 @@ class CrawlerApp:
                         tag.decompose()
                     title = " ".join(soup.title.get_text(" ", strip=True).split()) if soup.title else urlparse(final_url).netloc
                     text_content = " ".join(soup.get_text(" ", strip=True).split())[:50000]
+                    matched_term = find_bot_restriction(
+                        text_content, restriction_phrases, restriction_words
+                    )
+                    if matched_term:
+                        self.bot_decision_event.clear()
+                        self.bot_decision_value = False
+                        self.events.put(("bot_warning", url, matched_term, text_content[:1800]))
+                        self.bot_decision_event.wait()
+                        if not self.bot_decision_value:
+                            self.events.put(("log", f"Stopped by user after restriction warning: {url}"))
+                            self.stop_event.set()
+                            break
                     links = []
                     for a in soup.find_all("a", href=True):
                         target = normalize_url(urljoin(final_url, a["href"]))
@@ -382,6 +435,19 @@ class CrawlerApp:
                     self.log_message(event[1])
                 elif event[0] == "progress":
                     self.progress.configure(value=event[1], maximum=event[2])
+                elif event[0] == "bot_warning":
+                    _, page_url, matched_term, excerpt = event
+                    prompt = (
+                        f"URL: {page_url}\\n\\n"
+                        f"Matched text from WORDS.JSON: {matched_term}\\n\\n"
+                        f"Page text excerpt:\\n{excerpt}\\n\\n"
+                        "This page appears to ask bots or automated crawlers not to enter. "
+                        "Do you want to continue crawling?"
+                    )
+                    self.bot_decision_value = messagebox.askyesno(
+                        "Possible bot restriction detected", prompt
+                    )
+                    self.bot_decision_event.set()
                 elif event[0] == "finished":
                     self.running = False
                     self.start_btn.configure(state="normal")
