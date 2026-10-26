@@ -1,0 +1,27 @@
+{
+  "phrases": [
+    "no bots",
+    "bots are not allowed",
+    "automated bots are not allowed",
+    "automated access is prohibited",
+    "automated requests are prohibited",
+    "no automated access",
+    "bot access is prohibited",
+    "do not crawl",
+    "do not scrape",
+    "not for bots",
+    "robots are not allowed",
+    "אין כניסה לבוטים",
+    "אין כניסה לרובוטים",
+    "בוטים אינם מורשים",
+    "אסור לבוטים",
+    "אין גישה לבוטים",
+    "אין לסרוק את האתר",
+    "אין לבצע סריקה אוטומטית",
+    "גישה אוטומטית אסורה"
+  ],
+  "words": [
+    "disallow-bots",
+    "bot-blocked"
+  ]
+}
