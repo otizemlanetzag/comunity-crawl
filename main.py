@@ -4,6 +4,7 @@ import csv
 import ipaddress
 import os
 import queue
+import urllib.robotparser
 import socket
 import threading
 import time
@@ -24,6 +25,8 @@ QUEUE_FILE = os.path.join(DATA_DIR, "CRAWL_QUEUE.CSV")
 PAGE_FIELDS = ["site_name", "site_url", "crawled_at", "title", "text", "links", "status"]
 QUEUE_FIELDS = ["site_name", "site_url", "status", "added_at", "error"]
 USER_AGENT = "CommunityCrawlDesktop/1.0 (+local desktop crawler)"
+ROBOTS_CACHE = {}
+ROBOTS_LOCK = threading.Lock()
 
 
 def utc_now():
@@ -66,6 +69,40 @@ def public_http_url(url):
         return True
     except (OSError, ValueError):
         return False
+
+
+def robots_allowed(url):
+    """Return whether robots.txt permits fetching this URL for our user-agent."""
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    robots_url = origin + "/robots.txt"
+    with ROBOTS_LOCK:
+        parser = ROBOTS_CACHE.get(origin)
+    if parser is None:
+        candidate = urllib.robotparser.RobotFileParser()
+        candidate.set_url(robots_url)
+        try:
+            response = requests.get(
+                robots_url,
+                headers={"User-Agent": USER_AGENT},
+                timeout=(5, 10),
+                allow_redirects=True,
+            )
+            if response.status_code == 404:
+                candidate.parse([])
+            elif 200 <= response.status_code < 300:
+                candidate.parse(response.text.splitlines())
+            else:
+                # If robots.txt cannot be read reliably, fail closed.
+                raise RuntimeError(f"robots.txt returned HTTP {response.status_code}")
+        except requests.RequestException as exc:
+            raise RuntimeError(f"could not read robots.txt ({exc})") from exc
+        except OSError as exc:
+            raise RuntimeError(f"could not read robots.txt ({exc})") from exc
+        with ROBOTS_LOCK:
+            ROBOTS_CACHE[origin] = candidate
+        parser = candidate
+    return parser.can_fetch(USER_AGENT, url)
 
 
 def read_rows(path, fields):
@@ -241,11 +278,20 @@ class CrawlerApp:
                     self.events.put(("log", f"Blocked non-public or invalid URL: {url}"))
                     continue
                 try:
+                    if not robots_allowed(url):
+                        self.events.put(("log", f"Disallowed by robots.txt: {url}"))
+                        seen.add(key)
+                        continue
                     response = session.get(url, timeout=(5, 15), allow_redirects=True, stream=True)
                     final_url = response.url
                     if not public_http_url(final_url):
                         response.close()
                         self.events.put(("log", f"Blocked unsafe redirect: {final_url}"))
+                        continue
+                    if normalize_url(final_url) != key and not robots_allowed(final_url):
+                        response.close()
+                        self.events.put(("log", f"Redirect target disallowed by robots.txt: {final_url}"))
+                        seen.add(key)
                         continue
                     content_type = response.headers.get("content-type", "").lower()
                     if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
